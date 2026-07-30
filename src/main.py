@@ -4,12 +4,20 @@ Self-Maintaining APIs - Main Entry Point
 The whole pipeline, end to end:
   [1] detect a breaking change in an API provider's documentation
   [2] scan a target folder for code that uses that API
-  [3] fix each affected file and save the result alongside the original
+  [3] fix each affected file
 
-Step [3] runs the fixer in DEMO MODE, which means it never calls the real
-Claude API: no API key is needed and nothing is billed. See src/core/fixer.py.
+Step [3] has two ways to save its work:
+  * by default it writes a copy next to the original, e.g. payment_fixed.py
+  * with --in-place it edits the original file directly, which is what a
+    GitHub pull request needs (a PR changes a file; it does not add a
+    second copy of it)
+
+Run `python -m src.main --help` to see every option. With no options at all it
+behaves exactly as it always has: detect, scan "examples", write _fixed.py
+copies, and never call the real Claude API.
 """
 
+import argparse
 import os
 
 from src.core.detector import APIChangeDetector
@@ -25,15 +33,64 @@ CHANGE_DESCRIPTION = (
     "`source`, and needs confirm=True to charge immediately."
 )
 
-# Which folder the scanner searches. Point this at the codebase you actually
-# want to check. It deliberately does NOT point at this project's own `src`
-# folder: this tool's source is full of the word "stripe" in comments and
-# examples, and those self-matches would bury the results you care about.
+# Default folder the scanner searches, used when --target is not given. It
+# deliberately does NOT point at this project's own `src` folder: this tool's
+# source is full of the word "stripe" in comments and examples, and those
+# self-matches would bury the results you care about.
 SCAN_TARGET = "examples"
+
+# Default keywords, used when --keywords is not given.
+DEFAULT_KEYWORDS = ["stripe", "requests.get"]
 
 # Files the fixer has already written end with this. We skip them, otherwise
 # the tool would keep trying to "fix" its own previous output, over and over.
 FIXED_SUFFIX = "_fixed.py"
+
+# The documentation page step [1] checks for breaking changes.
+DOCS_URL = "https://stripe.com/docs/upgrades"
+
+
+def parse_args(argv=None):
+    """Read the command line options.
+
+    Args:
+        argv: Normally left as None, which means "use the real command line".
+            Tests can pass a list of strings instead.
+    """
+    parser = argparse.ArgumentParser(
+        # Show default values automatically in --help, so nobody has to guess.
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description="Detect an API change, find affected code, and fix it.",
+    )
+    parser.add_argument(
+        "--target",
+        default=SCAN_TARGET,
+        metavar="PATH",
+        help="Folder to scan for affected code.",
+    )
+    parser.add_argument(
+        "--keywords",
+        nargs="+",  # accepts one or more values
+        default=DEFAULT_KEYWORDS,
+        metavar="KEYWORD",
+        help="Keywords that mark code as affected.",
+    )
+    parser.add_argument(
+        "--in-place",
+        action="store_true",  # True when the flag is present, else False
+        help="Overwrite the original files instead of writing _fixed.py copies.",
+    )
+    parser.add_argument(
+        "--skip-detect",
+        action="store_true",
+        help="Skip step [1]. It opens a browser and takes 10-30 seconds.",
+    )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Call the real Claude API instead of using demo mode.",
+    )
+    return parser.parse_args(argv)
 
 
 def display_path(path: str) -> str:
@@ -76,14 +133,96 @@ def group_findings_by_file(findings: list) -> dict:
     return {path: counts[path] for path in sorted(counts)}
 
 
-def fix_files_from_findings(findings: list) -> None:
-    """Fix every file the scanner flagged, and save each result to a new file.
+def read_source_file(file_path: str) -> tuple:
+    """Read a Python file, and note which line ending it uses.
+
+    We read raw bytes rather than text so we can *see* the real line endings
+    before Python hides them. That matters for --in-place: if we wrote "\\n"
+    into a file that used "\\r\\n", every single line would show up as changed
+    in a diff, which would make the pull request unreadable.
+
+    Returns:
+        A tuple of ``(code, uses_crlf)``. `code` always uses plain "\\n" line
+        endings, which is what the fixer expects. `uses_crlf` records what the
+        file actually had, so we can put it back exactly as we found it.
+
+    Raises:
+        OSError: the file could not be read (missing, permissions).
+        UnicodeDecodeError: the file is not valid UTF-8 text.
+    """
+    with open(file_path, "rb") as f:
+        raw = f.read()
+
+    text = raw.decode("utf-8")
+
+    # Work out the dominant line ending. A file with 40 CRLF lines and one
+    # stray LF is a CRLF file, so we compare the two counts rather than just
+    # asking "is there a single \r\n anywhere?".
+    crlf_count = raw.count(b"\r\n")
+    lone_lf_count = raw.count(b"\n") - crlf_count
+    uses_crlf = crlf_count > lone_lf_count
+
+    # Normalise to "\n" for the fixer. The second replace catches the very old
+    # Mac style of using "\r" on its own.
+    code = text.replace("\r\n", "\n").replace("\r", "\n")
+    return code, uses_crlf
+
+
+def write_in_place(file_path: str, fixed_code: str, uses_crlf: bool) -> None:
+    """Overwrite `file_path` with `fixed_code`, keeping its line endings.
+
+    Raises:
+        OSError: the file could not be written.
+    """
+    # Start from a known state (plain "\n"), then convert if the original file
+    # used "\r\n".
+    to_write = fixed_code.replace("\r\n", "\n")
+    if uses_crlf:
+        to_write = to_write.replace("\n", "\r\n")
+
+    # newline="" tells Python to write our line endings through untouched.
+    # Without it, Windows would silently turn every "\n" into "\r\n" and undo
+    # all the care above.
+    with open(file_path, "w", encoding="utf-8", newline="") as f:
+        f.write(to_write)
+
+
+def build_fixer(use_live: bool) -> CodeFixer:
+    """Create the fixer and say out loud which mode it actually ended up in.
+
+    We ask for live mode when --live was passed, but CodeFixer quietly falls
+    back to demo mode when it cannot find an API key. So we report
+    `fixer.demo_mode` - what really happened - rather than what we asked for.
+    """
+    fixer = CodeFixer(demo_mode=not use_live)
+
+    if fixer.demo_mode:
+        print("Mode: DEMO - no real AI call is made, so this costs nothing.")
+        if fixer.demo_reason:
+            print(f"      Reason: {fixer.demo_reason}.")
+        if use_live:
+            # The user asked for --live and did not get it. Say so plainly.
+            print("      You passed --live, but demo mode was used instead.")
+            print("      Add ANTHROPIC_API_KEY to your .env file for real fixes.")
+    else:
+        print(f"Mode: LIVE - calling the real Claude API ({fixer.model}).")
+
+    return fixer
+
+
+def fix_files_from_findings(
+    findings: list,
+    in_place: bool = False,
+    use_live: bool = False,
+) -> None:
+    """Fix every file the scanner flagged.
 
     One file at a time, we:
       1. skip it if it is already one of our own `_fixed.py` outputs
       2. read the current contents
       3. ask the fixer for an updated version
-      4. save that version next to the original
+      4. save that version - either over the original (--in-place) or as a
+         separate `_fixed.py` copy (the default)
 
     Anything that goes wrong with one file is reported and we move on to the
     next, so a single unreadable file cannot stop the whole run.
@@ -92,10 +231,15 @@ def fix_files_from_findings(findings: list) -> None:
         print("Nothing to fix - the scan found no matching code.")
         return
 
-    # demo_mode=True is the important part: no network, no key, no cost.
-    fixer = CodeFixer(demo_mode=True)
-    print("Mode: DEMO - no real AI call is made, so this costs nothing.")
-    print("      (Pass demo_mode=False and set ANTHROPIC_API_KEY for real fixes.)")
+    fixer = build_fixer(use_live)
+
+    # Loud warning before we touch anybody's source files.
+    if in_place:
+        print()
+        print("!" * 60)
+        print("IN-PLACE MODE: original files will be overwritten.")
+        print("No _fixed.py copies are created. Commit or back up first.")
+        print("!" * 60)
 
     files_to_fix = group_findings_by_file(findings)
 
@@ -120,8 +264,7 @@ def fix_files_from_findings(findings: list) -> None:
 
         # --- 2. Read the file -------------------------------------------
         try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                original_code = f.read()
+            original_code, uses_crlf = read_source_file(file_path)
         except (OSError, UnicodeDecodeError) as error:
             # Permissions, a deleted file, or text that is not valid UTF-8.
             print(f"{label} -> FAILED (could not read the file: {error})")
@@ -141,21 +284,34 @@ def fix_files_from_findings(findings: list) -> None:
             continue
 
         # The fixer may decide this file needs no change after all. Writing an
-        # identical copy would just be noise, so we say so and move on.
+        # identical copy would just be noise, so we say so and move on. This
+        # matters even more in --in-place mode: it saves a pointless rewrite
+        # that would show up as a modified file in git for no reason.
         if fixed_code == original_code:
             print(f"{label} -> no change needed")
             skipped += 1
             continue
 
-        # --- 4. Save the result to a new file ---------------------------
-        # save_fixed_code also returns an "ERROR: ..." string on failure.
-        saved_path = fixer.save_fixed_code(file_path, fixed_code)
-        if saved_path.startswith("ERROR:"):
-            print(f"{label} -> FAILED ({saved_path})")
-            failed += 1
-            continue
+        # --- 4. Save the result -----------------------------------------
+        if in_place:
+            # Overwrite the original, keeping its original line endings.
+            try:
+                write_in_place(file_path, fixed_code, uses_crlf)
+            except OSError as error:
+                print(f"{label} -> FAILED (could not write the file: {error})")
+                failed += 1
+                continue
+            print(f"{label} -> updated in place")
+        else:
+            # Write a separate copy. save_fixed_code also returns an
+            # "ERROR: ..." string on failure rather than raising.
+            saved_path = fixer.save_fixed_code(file_path, fixed_code)
+            if saved_path.startswith("ERROR:"):
+                print(f"{label} -> FAILED ({saved_path})")
+                failed += 1
+                continue
+            print(f"{label} -> saved {display_path(saved_path)}")
 
-        print(f"{label} -> saved {display_path(saved_path)}")
         changed += 1
 
     # --- The summary ----------------------------------------------------
@@ -163,57 +319,62 @@ def fix_files_from_findings(findings: list) -> None:
         f"\nSummary: {examined} file(s) examined, "
         f"{changed} changed, {skipped} skipped, {failed} failed."
     )
-    if changed:
+    if changed and in_place:
+        print("Your original files were edited. Use `git diff` to review them.")
+    elif changed:
         print("Open each *_fixed.py next to its original to compare the two.")
         print("Nothing was overwritten - your original files are untouched.")
 
 
-def main():
+def main(argv=None):
+    args = parse_args(argv)
+
     print("=" * 60)
     print("Self-Maintaining APIs - Starting scan...")
     print("=" * 60)
 
-    # 1. Detect possible changes from API documentation
-    docs_url = "https://stripe.com/docs/upgrades"
-    print(f"\n[1] Checking documentation: {docs_url}")
+    # 1. Detect possible changes from API documentation. This is the slow part
+    #    - it drives a real browser - so --skip-detect lets you jump past it
+    #    while working on steps [2] and [3].
+    if args.skip_detect:
+        print("\n[1] Skipped the documentation check (--skip-detect).")
+        print("    Using the known Stripe breaking change instead.")
+    else:
+        print(f"\n[1] Checking documentation: {DOCS_URL}")
 
-    detector = APIChangeDetector(docs_url)
-    changes = detector.detect()
+        detector = APIChangeDetector(DOCS_URL)
+        changes = detector.detect()
 
-    if not changes:
-        print("No potential breaking changes or deprecations found.")
-        print("Done.")
-        return
+        if not changes:
+            print("No potential breaking changes or deprecations found.")
+            print("Done.")
+            return
 
-    print(f"Found {len(changes)} potential change(s):")
-    for i, change in enumerate(changes, 1):
-        print(f"  {i}. [{change.get('type', change.get('severity', 'unknown'))}] {change.get('message', change.get('text', ''))}")
+        print(f"Found {len(changes)} potential change(s):")
+        for i, change in enumerate(changes, 1):
+            print(f"  {i}. [{change.get('type', change.get('severity', 'unknown'))}] {change.get('message', change.get('text', ''))}")
 
     # 2. Scan the target codebase for related API usage
-    print(f"\n[2] Scanning '{SCAN_TARGET}' for related API usage...")
+    print(f"\n[2] Scanning '{args.target}' for related API usage...")
 
-    # Keywords we want to look for (you can expand this list later)
-    keywords = ["stripe", "requests.get"]
-
-    # project_root=SCAN_TARGET keeps the scan focused on the code we care
+    # project_root=args.target keeps the scan focused on the code we care
     # about. The scanner skips matches that only appear in comments or strings
     # by default, so prose about Stripe is not reported as real usage.
-    scanner = CodebaseScanner(SCAN_TARGET)
-    findings = scanner.scan_for_api_usage(keywords)
+    scanner = CodebaseScanner(args.target)
+    findings = scanner.scan_for_api_usage(args.keywords)
 
     # scanner.files_scanned tells us how much ground we covered, which makes a
     # result of "0 matches" much easier to interpret.
-    print(f"Scanned {scanner.files_scanned} Python file(s) in '{SCAN_TARGET}'.")
-    print(f"Keywords: {', '.join(keywords)}")
+    print(f"Scanned {scanner.files_scanned} Python file(s) in '{args.target}'.")
+    print(f"Keywords: {', '.join(args.keywords)}")
 
     if not findings:
         # Zero matches is a perfectly normal outcome, not a failure. Say so
         # plainly instead of leaving the user wondering what went wrong.
         print("\nNo matching API usage found - that is expected here.")
-        print(f"Nothing in '{SCAN_TARGET}' uses these keywords in real code yet.")
-        print("To scan your own project, change SCAN_TARGET at the top of this file")
-        print("to that project's folder, or run the scanner directly:")
-        print("  python -m src.core.scanner <folder> --keywords stripe requests.get")
+        print(f"Nothing in '{args.target}' uses these keywords in real code yet.")
+        print("To scan a different project, pass --target:")
+        print("  python -m src.main --target path/to/project")
     else:
         print(f"\nFound {len(findings)} matching line(s):\n")
         for finding in findings:
@@ -222,10 +383,13 @@ def main():
             print(f"  Matched: {finding['matched_keyword']}")
             print("-" * 50)
 
-    # 3. Fix the real files the scanner just found, instead of a hardcoded
-    #    snippet. Each fix is written to a new *_fixed.py file.
+    # 3. Fix the real files the scanner just found.
     print("\n[3] Fixing the affected files with the AI code fixer...")
-    fix_files_from_findings(findings)
+    fix_files_from_findings(
+        findings,
+        in_place=args.in_place,
+        use_live=args.live,
+    )
 
     print("\n" + "=" * 60)
     print("Scan completed.")
