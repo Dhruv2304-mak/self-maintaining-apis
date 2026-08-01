@@ -1,7 +1,7 @@
 """Payment helpers for the checkout flow.
 
 This module is deliberately OUT OF DATE. Both functions below still call
-Stripe's old Charges API, which Stripe has since removed, so this is the kind
+Stripe's modern PaymentIntents API, which Stripe has since removed, so this is the kind
 of file the scanner is meant to find and the fixer is meant to update.
 """
 
@@ -22,20 +22,22 @@ def charge_customer(amount, token):
     Returns:
         The Charge object Stripe sends back.
     """
-    return stripe.Charge.create(
+    return stripe.PaymentIntent.create(
         amount=amount,
         currency=DEFAULT_CURRENCY,
-        source=token,  # card token from the front end
+        payment_method=token,  # renamed from `source`
+        confirm=True,  # charge now, like Charge.create did
     )
 
 
 def charge_with_receipt(amount, token, email):
     """Charge a customer and ask Stripe to email them a receipt."""
     # `description` is what the customer sees on their bank statement.
-    return stripe.Charge.create(
+    return stripe.PaymentIntent.create(
         amount=amount,
         currency=DEFAULT_CURRENCY,
-        source=token,
+        payment_method=token,  # renamed from `source`
+        confirm=True,  # charge now, like Charge.create did
         description="Order payment",
         receipt_email=email,
     )
