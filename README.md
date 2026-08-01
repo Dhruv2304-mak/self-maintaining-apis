@@ -87,6 +87,14 @@ python -m src.core.publisher                                  # dry-run a PR
 
 Run `python -m src.main --help` for every option.
 
+## Running tests
+
+```bash
+python -m pytest
+python -m pytest -m meta
+python -m pytest --cov --cov-report=term-missing
+```
+
 ## A note on demo mode
 
 Demo mode is a **hard-coded string substitution**, not an AI fix. It knows one
