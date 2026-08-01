@@ -1,0 +1,23 @@
+[run]
+source = src
+branch = True
+omit =
+    */venv/*
+    */__pycache__/*
+    src/__main__.py
+
+[report]
+; src/ and src/core/ have no __init__.py, so coverage treats them as namespace
+; packages and, by default, skips src/core entirely -- the report would silently
+; cover src/main.py alone (217 of 562 statements) and read as complete.
+include_namespace_packages = True
+show_missing = True
+skip_covered = False
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError
+    if TYPE_CHECKING:
+
+[html]
+directory = htmlcov
