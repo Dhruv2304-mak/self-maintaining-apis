@@ -23,6 +23,8 @@ import re
 import tokenize
 from typing import Dict, List, Optional, Tuple
 
+from src.core.paths import is_fixed_output
+
 # Folders we never want to walk into. These hold installed packages or build
 # artefacts, so matches in them are not our code and would drown out the rest.
 IGNORED_DIRS = {"venv", ".venv", "__pycache__", ".git"}
@@ -112,7 +114,12 @@ class CodebaseScanner:
 
             for filename in filenames:
                 if filename.endswith(".py"):
-                    python_files.append(os.path.join(current_dir, filename))
+                    full_path = os.path.join(current_dir, filename)
+                    # Our own previous output is not part of the codebase, and
+                    # counting it would double every finding after a fix run.
+                    if is_fixed_output(full_path):
+                        continue
+                    python_files.append(full_path)
 
         return python_files
 

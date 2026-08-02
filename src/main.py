@@ -25,6 +25,7 @@ import os
 
 from src.core.detector import APIChangeDetector
 from src.core.fixer import CodeFixer
+from src.core.paths import is_fixed_output
 from src.core.publisher import PRPublisher
 from src.core.scanner import CodebaseScanner
 
@@ -47,9 +48,10 @@ SCAN_TARGET = "examples"
 # Default keywords, used when --keywords is not given.
 DEFAULT_KEYWORDS = ["stripe", "requests.get"]
 
-# Files the fixer has already written end with this. We skip them, otherwise
-# the tool would keep trying to "fix" its own previous output, over and over.
-FIXED_SUFFIX = "_fixed.py"
+# Files the fixer has already written are recognised by is_fixed_output(). We
+# skip them, otherwise the tool would keep trying to "fix" its own previous
+# output, over and over. The rule lives in src/core/paths.py so the scanner and
+# this module cannot drift apart.
 
 # The documentation page step [1] checks for breaking changes.
 DOCS_URL = "https://stripe.com/docs/upgrades"
@@ -341,7 +343,7 @@ def fix_files_from_findings(
         label = f"  {shown}: {match_count} match(es)"
 
         # --- 1. Never try to fix our own output -------------------------
-        if file_path.endswith(FIXED_SUFFIX):
+        if is_fixed_output(file_path):
             print(f"{label} -> skipped (already a fixed file)")
             skipped += 1
             continue
