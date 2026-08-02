@@ -1,5 +1,8 @@
 # Phase 2 Spec — Fakes and Error Paths
 
+> **Read `docs/phase2-spec-errata.md` alongside this file.** It corrects five
+> errors in the sections below. Where they disagree, the errata wins.
+
 **File:** `docs/phase2-fakes-and-error-paths-spec.md`
 **Project:** `self-maintaining-apis`
 **Prerequisites:** Phase 0 (test harness) and Phase 1 (scanner + fixer pure logic) complete and committed.
