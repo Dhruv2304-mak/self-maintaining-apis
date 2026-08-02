@@ -22,12 +22,15 @@ copies, never call the real Claude API, and never touch GitHub.
 
 import argparse
 import os
+from datetime import datetime, timezone
 
 from src.core.detector import APIChangeDetector
 from src.core.fixer import CodeFixer
 from src.core.paths import is_fixed_output
 from src.core.publisher import PRPublisher
 from src.core.scanner import CodebaseScanner
+from src.domain.change_event import ChangeEvent
+from src.sources.declared import DeclaredSource
 
 # A plain-English description of what the provider changed. In a finished tool
 # this text would come from the detector; here we spell it out so the demo is
@@ -38,6 +41,14 @@ CHANGE_DESCRIPTION = (
     "stripe.PaymentIntent.create() takes `payment_method` rather than "
     "`source`, and needs confirm=True to charge immediately."
 )
+
+# What the declared change concerns. These are declarations made by this
+# repository, not facts derived from vendor data -- CHANGE_DESCRIPTION already
+# says the Charge API was removed, and these two name the same thing in the
+# form ChangeEvent requires. Override at the command line with --symbol and
+# --change-class.
+DECLARED_SYMBOL = "stripe.Charge.create"
+DECLARED_CHANGE_CLASS = "removed"
 
 # Default folder the scanner searches, used when --target is not given. It
 # deliberately does NOT point at this project's own `src` folder: this tool's
@@ -118,6 +129,12 @@ def parse_args(argv=None):
         action="store_true",
         help="Describe the pull request instead of creating it, even with a token.",
     )
+    parser.add_argument("--symbol", default=DECLARED_SYMBOL, metavar="NAME",
+        help="The API symbol the change concerns.")
+    parser.add_argument("--change-class", default=DECLARED_CHANGE_CLASS,
+        metavar="KIND", help="What kind of change this is.")
+    parser.add_argument("--source-url", default=DOCS_URL, metavar="URL",
+        help="Where the change is documented.")
 
     args = parser.parse_args(argv)
 
@@ -250,6 +267,32 @@ def write_in_place(file_path: str, fixed_code: str, uses_crlf: bool) -> None:
         f.write(to_write)
 
 
+def utc_now_iso() -> str:
+    """Right now, as an ISO-8601 UTC timestamp.
+
+    The one place the system reads the clock. Passed into the source adapter
+    rather than called inside it, so tests can supply a fixed time.
+    """
+    return datetime.now(timezone.utc).isoformat()
+
+
+def build_change_event(args, clock=utc_now_iso) -> ChangeEvent:
+    """Turn the declared change into a typed ChangeEvent.
+
+    The values come from the command line, falling back to the constants at
+    the top of this module. Nothing is invented here: every field is either
+    something the operator passed or something this repository declares.
+    """
+    source = DeclaredSource(
+        symbol=args.symbol,
+        change_class=args.change_class,
+        description=CHANGE_DESCRIPTION,
+        source_url=args.source_url,
+        clock=clock,
+    )
+    return source.fetch_change_events()[0]
+
+
 def build_fixer(use_live: bool) -> CodeFixer:
     """Create the fixer and say out loud which mode it actually ended up in.
 
@@ -277,6 +320,7 @@ def fix_files_from_findings(
     findings: list,
     in_place: bool = False,
     use_live: bool = False,
+    change_description: str = CHANGE_DESCRIPTION,
 ) -> dict:
     """Fix every file the scanner flagged.
 
@@ -361,7 +405,7 @@ def fix_files_from_findings(
         # fix_code never raises; it returns an "ERROR: ..." string instead.
         fixed_code = fixer.fix_code(
             original_code=original_code,
-            change_description=CHANGE_DESCRIPTION,
+            change_description=change_description,
             file_path=file_path,
         )
         if fixed_code.startswith("ERROR:"):
@@ -451,7 +495,7 @@ def build_pr_title(result: dict) -> str:
     )
 
 
-def build_pr_body(result: dict) -> str:
+def build_pr_body(result: dict, change_description: str = CHANGE_DESCRIPTION) -> str:
     """Write the pull request description for a human reviewer.
 
     The most important job here is honesty about where the change came from.
@@ -482,7 +526,7 @@ def build_pr_body(result: dict) -> str:
     lines += [
         "## The breaking change",
         "",
-        CHANGE_DESCRIPTION,
+        change_description,
         "",
         "## Files updated",
         "",
@@ -508,7 +552,12 @@ def build_pr_body(result: dict) -> str:
     return "\n".join(lines)
 
 
-def open_pull_request(result: dict, repo_full_name: str, force_dry_run: bool) -> None:
+def open_pull_request(
+    result: dict,
+    repo_full_name: str,
+    force_dry_run: bool,
+    change_description: str = CHANGE_DESCRIPTION,
+) -> None:
     """Put the fixed files into a pull request for review."""
     changes = result["changes"]
 
@@ -521,7 +570,7 @@ def open_pull_request(result: dict, repo_full_name: str, force_dry_run: bool) ->
     publisher = PRPublisher(repo_full_name, dry_run=force_dry_run)
 
     title = build_pr_title(result)
-    body = build_pr_body(result)
+    body = build_pr_body(result, change_description)
 
     # In a dry run, show the description too. It is the part a reviewer reads,
     # so it is worth checking before a real pull request goes out.
@@ -545,6 +594,7 @@ def open_pull_request(result: dict, repo_full_name: str, force_dry_run: bool) ->
 
 def main(argv=None):
     args = parse_args(argv)
+    change_event = build_change_event(args)
 
     print("=" * 60)
     print("Self-Maintaining APIs - Starting scan...")
@@ -606,12 +656,18 @@ def main(argv=None):
         findings,
         in_place=args.in_place,
         use_live=args.live,
+        change_description=change_event.description,
     )
 
     # 4. Optionally put the results in front of a reviewer.
     if args.open_pr:
         print("\n[4] Opening a pull request with the fixed files...")
-        open_pull_request(result, args.repo, force_dry_run=args.dry_run)
+        open_pull_request(
+            result,
+            args.repo,
+            force_dry_run=args.dry_run,
+            change_description=change_event.description,
+        )
 
     print("\n" + "=" * 60)
     print("Scan completed.")
