@@ -5,6 +5,7 @@ no .env leakage, no network access, and no working-tree mutation during tests.
 Do not weaken or remove them without review.
 """
 
+import importlib
 import socket
 import warnings
 from pathlib import Path
@@ -23,6 +24,13 @@ SCRUBBED_ENV_VARS = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "OPENAI_API_KEY",
+]
+
+# Product modules that do `from dotenv import load_dotenv` at import time. Keep
+# this in step with: grep -rn "from dotenv import" src/
+DOTENV_IMPORTING_MODULES = [
+    "src.core.fixer",
+    "src.core.publisher",
 ]
 
 _NO_DOTENV_CALLED = {"called": False}
@@ -47,9 +55,16 @@ def no_dotenv(clean_env, monkeypatch):
     monkeypatch.setattr(dotenv.main, "load_dotenv", _noop_load_dotenv)
     monkeypatch.setattr(dotenv, "find_dotenv", lambda *args, **kwargs: "")
 
-    # Note: modules that imported load_dotenv directly before this conftest
-    # executed still hold the original reference. Later phases will patch those
-    # namespaces if needed.
+    # Patching the dotenv module is not enough on its own: a module that did
+    # `from dotenv import load_dotenv` at import time holds its own reference to
+    # the original function, so it must be patched in ITS namespace. Both of
+    # these call load_dotenv() unconditionally in __init__, and the real .env
+    # holds a working GitHub token, so missing one would hand a test live
+    # credentials -- and, for CodeFixer, a real API client instead of demo mode.
+    for module_name in DOTENV_IMPORTING_MODULES:
+        module = importlib.import_module(module_name)
+        monkeypatch.setattr(module, "load_dotenv", _noop_load_dotenv)
+
     return _NO_DOTENV_CALLED
 
 

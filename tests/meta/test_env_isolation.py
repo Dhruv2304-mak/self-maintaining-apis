@@ -5,9 +5,11 @@ tests/conftest.py on purpose: a test that imports the constant cannot notice the
 constant shrinking.
 """
 
+import importlib
 import os
 
 import dotenv
+import pytest
 
 SCRUBBED = [
     "GITHUB_TOKEN",
@@ -54,3 +56,44 @@ def test_dotenv_main_load_dotenv_is_a_noop():
 
 def test_dotenv_find_dotenv_returns_empty():
     assert dotenv.find_dotenv() == ""
+
+
+@pytest.mark.parametrize("module_name", ["src.core.fixer", "src.core.publisher"])
+def test_product_modules_hold_the_patched_load_dotenv(module_name):
+    """Every module that bound load_dotenv at import time must be patched.
+
+    These modules did `from dotenv import load_dotenv`, so they keep their own
+    reference; patching the dotenv module alone does not reach them.
+    """
+    module = importlib.import_module(module_name)
+
+    assert module.load_dotenv() is False
+
+
+def test_constructing_codefixer_does_not_repopulate_the_environment():
+    """CodeFixer.__init__ calls load_dotenv() unconditionally.
+
+    Unpatched, that reads the real .env and a recovered ANTHROPIC_API_KEY would
+    silently take the fixer out of demo mode and into a live API client.
+    """
+    from src.core.fixer import CodeFixer
+
+    built = CodeFixer()
+
+    for var in SCRUBBED:
+        assert var not in os.environ, f"constructing CodeFixer restored {var}"
+    assert built.demo_mode is True
+    assert built._client is None
+
+
+def test_constructing_prpublisher_does_not_repopulate_the_environment():
+    """publisher.py binds load_dotenv the same way and reads a GitHub token."""
+    from src.core.publisher import PRPublisher
+
+    built = PRPublisher("owner/repo")
+
+    for var in SCRUBBED:
+        assert var not in os.environ, f"constructing PRPublisher restored {var}"
+    # No token recovered means no live GitHub calls are possible.
+    assert built.dry_run is True
+    assert built.dry_run_reason == "no GITHUB_TOKEN was found"
