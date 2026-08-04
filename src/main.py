@@ -56,9 +56,6 @@ DECLARED_CHANGE_CLASS = "removed"
 # self-matches would bury the results you care about.
 SCAN_TARGET = "examples"
 
-# Default keywords, used when --keywords is not given.
-DEFAULT_KEYWORDS = ["stripe", "requests.get"]
-
 # Files the fixer has already written are recognised by is_fixed_output(). We
 # skip them, otherwise the tool would keep trying to "fix" its own previous
 # output, over and over. The rule lives in src/core/paths.py so the scanner and
@@ -95,9 +92,11 @@ def parse_args(argv=None):
     parser.add_argument(
         "--keywords",
         nargs="+",  # accepts one or more values
-        default=DEFAULT_KEYWORDS,
+        default=None,
         metavar="KEYWORD",
-        help="Keywords that mark code as affected.",
+        help="Widen the search beyond the change event's symbol. Defaults to "
+        "the symbol itself, so only code relating to the declared change is "
+        "reported.",
     )
     parser.add_argument(
         "--in-place",
@@ -633,15 +632,28 @@ def main(argv=None):
     # by default, so prose about Stripe is not reported as real usage.
     # scan() is the typed Impact Analysis boundary: it takes the ChangeEvent and
     # returns Finding objects carrying its id, so a fix can be traced back to
-    # the change that prompted it. args.keywords widens the search beyond the
-    # event's own symbol, which is what the older keyword behaviour did.
+    # the change that prompted it.
+    #
+    # The event's symbol is what we search for. Anything else would stamp
+    # unrelated matches with this event's id, and a Finding is defined as one
+    # place affected by ONE ChangeEvent. --keywords is an explicit opt-in to
+    # widen that, for when a package name appears where the dotted path does not.
+    #
+    # search_terms is computed once and used for both the search and the printed
+    # line, so the two cannot disagree about what was looked for.
+    search_terms = (
+        list(args.keywords)
+        if args.keywords is not None
+        else [change_event.symbol]
+    )
+
     scanner = CodebaseScanner(args.target)
-    findings = scanner.scan(change_event, args.keywords)
+    findings = scanner.scan(change_event, search_terms)
 
     # scanner.files_scanned tells us how much ground we covered, which makes a
     # result of "0 matches" much easier to interpret.
     print(f"Scanned {scanner.files_scanned} Python file(s) in '{args.target}'.")
-    print(f"Keywords: {', '.join(args.keywords)}")
+    print(f"Searching for: {', '.join(search_terms)}")
 
     if not findings:
         # Zero matches is a perfectly normal outcome, not a failure. Say so

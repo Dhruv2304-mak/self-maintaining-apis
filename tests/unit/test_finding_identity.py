@@ -104,6 +104,60 @@ def test_none_column_cannot_collide_with_a_stringified_int():
     assert derive(column=None) == derive(column=None)
 
 
+# --- the numeric half of the type guard ----------------------------------
+
+
+@pytest.mark.parametrize("bad", ["1", 1.5, [1], {"a": 1}, b"1", None, True, False])
+def test_line_rejects_every_non_int(bad):
+    """line and column are rendered to str before _fingerprint sees them, so its
+    own type check cannot reach them. Without this guard, line=[1, 2] renders
+    "[1, 2]" and returns a perfectly valid-looking id."""
+    with pytest.raises(TypeError, match="line must be an int"):
+        derive(line=bad)
+
+
+@pytest.mark.parametrize("bad", ["1", 1.5, [1], {"a": 1}, b"1", True, False])
+def test_column_rejects_every_non_int_except_none(bad):
+    with pytest.raises(TypeError, match="column must be an int or None"):
+        derive(column=bad)
+
+
+@pytest.mark.parametrize("field_name", ["line", "column"])
+def test_bool_is_rejected_despite_being_an_int_subclass(field_name):
+    """A bare isinstance(x, int) check would let True through and render "True"."""
+    with pytest.raises(TypeError):
+        derive(**{field_name: True})
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad", "type_name"),
+    [("line", [1, 2], "list"), ("column", "0", "str"), ("line", 1.5, "float")],
+)
+def test_the_numeric_type_error_names_the_offending_type(field_name, bad, type_name):
+    with pytest.raises(TypeError) as excinfo:
+        derive(**{field_name: bad})
+
+    assert type_name in str(excinfo.value)
+
+
+def test_a_string_column_cannot_collide_with_the_none_sentinel():
+    """The type check is what closes the sentinel collision, not the encoding.
+
+    None is rendered as the literal "none", so a caller passing column="none"
+    would otherwise produce the same digest as column=None. Rejecting str is
+    therefore load-bearing for the encoding's unambiguity, not merely defensive.
+    Relaxing the check reopens the collision.
+    """
+    with pytest.raises(TypeError, match="column must be an int or None"):
+        derive(column="none")
+
+
+def test_zero_is_a_valid_column_and_is_not_confused_with_none():
+    """0 is falsy, so a truthiness check here would misread it as absent."""
+    assert derive(column=0) != derive(column=None)
+    assert derive(column=0).startswith("f-")
+
+
 # --- line and column are rendered distinctly ------------------------------
 
 

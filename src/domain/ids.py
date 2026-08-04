@@ -83,9 +83,29 @@ def derive_finding_id(
         same ChangeEvent produces the same finding ids, which is what lets a
         later run tell a new finding from one already seen.
 
+    Raises:
+        TypeError: `line` was not an int, or `column` was neither None nor an
+            int. Both are rendered to str before :func:`_fingerprint` sees them,
+            so its own type check cannot reach them -- without this, passing
+            ``line=[1, 2]`` would render "[1, 2]" and return a valid-looking id.
+
     The numeric parts are rendered as text because :func:`_fingerprint` takes
-    only strings. None becomes "none", which cannot collide with any str(int).
+    only strings. None becomes "none". That sentinel can only collide with a
+    literal ``column="none"``, which the type check below rejects -- the check is
+    load-bearing for the encoding, not merely defensive. Range checking is
+    deliberately absent: CodeLocation.__post_init__ already enforces line >= 1
+    and column >= 0, and repeating it here would be two places to keep in step.
     """
+    # bool is a subclass of int, so a bare isinstance check would let True
+    # through and silently render it as "True".
+    if not isinstance(line, int) or isinstance(line, bool):
+        raise TypeError(f"line must be an int, got {type(line).__name__}: {line!r}")
+
+    if column is not None and (not isinstance(column, int) or isinstance(column, bool)):
+        raise TypeError(
+            f"column must be an int or None, got {type(column).__name__}: {column!r}"
+        )
+
     digest = _fingerprint(
         change_event_id,
         file_path,

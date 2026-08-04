@@ -300,10 +300,18 @@ class CodebaseScanner:
             A tuple of Finding, possibly empty, at most one per keyword per line.
             Empty is a normal result, not an error.
 
-        Paths on the returned Findings are POSIX-form, per the CodeLocation
-        contract, so they differ from the native absolute paths
-        :meth:`scan_for_api_usage` returns. On Windows that means forward
-        slashes; ``open()`` accepts them either way.
+        Paths on the returned Findings use forward slashes, so they differ from
+        the native absolute paths :meth:`scan_for_api_usage` returns. ``open()``
+        accepts them either way.
+
+        They are, however, **absolute** -- "C:/project/examples/payment.py", not
+        "examples/payment.py". CodeLocation documents its `file_path` as
+        POSIX-form *and repository-relative*; this method satisfies only the
+        separator half of that contract. Do not read forward slashes as evidence
+        the whole contract is honoured. Making the paths relative is deferred
+        because `file_path` is an input to
+        :func:`~src.domain.ids.derive_finding_id`, so changing its form
+        re-derives every finding id.
         """
         keywords = (
             [change_event.symbol] if api_keywords is None else list(api_keywords)

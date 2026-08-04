@@ -201,7 +201,12 @@ def test_finding_id_is_derived_from_the_documented_inputs(tmp_path, event):
 
 
 def test_rescanning_an_unchanged_tree_yields_identical_findings(tmp_path, event):
-    """Determinism is what lets a later run tell new findings from seen ones."""
+    """Re-scanning an unchanged tree is stable. That is the whole claim.
+
+    It does NOT follow that a finding can be recognised across edits: `line` and
+    `column` are digest inputs, so inserting a single line above a match changes
+    the finding_id of every match below it in that file.
+    """
     write_tree(tmp_path, {"a.py": CODE_WITH_TWO_HITS})
 
     first = CodebaseScanner(str(tmp_path)).scan(event)
