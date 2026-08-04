@@ -130,7 +130,7 @@ def test_fingerprint_is_order_sensitive():
 
 @pytest.mark.parametrize("field_name", ID_INPUTS)
 def test_a_non_string_input_raises_type_error(field_name):
-    """An int has no len(), so the length-prefix step rejects it."""
+    """_fingerprint checks isinstance(part, str) before hashing anything."""
     with pytest.raises(TypeError):
         derive(**{field_name: 123})
 
@@ -141,15 +141,18 @@ def test_none_input_raises_type_error(field_name):
         derive(**{field_name: None})
 
 
-def test_a_sized_non_string_is_accepted_rather_than_rejected():
-    """Characterization, not endorsement.
+@pytest.mark.parametrize("sized_value", [[], (), {}, b"x", set(), bytearray(b"y")])
+def test_a_sized_non_string_is_now_rejected(sized_value):
+    """Supersedes an earlier characterization test.
 
-    The guard is `len(part)` inside an f-string, so it rejects values with no
-    __len__ (int, None, float, bool) but silently accepts any sized object -- a
-    list, tuple, dict or bytes all produce an id. Nothing in this slice type-
-    checks for str. Pinned so that tightening it later is a visible decision.
+    Until the explicit isinstance check was added, the only guard was `len(part)`
+    inside an f-string. That rejects values with no __len__ (int, None, float)
+    but silently accepted any sized object, so a list or dict produced a
+    perfectly good-looking id. An id must only ever be derived from text, so
+    these are now TypeError.
     """
-    assert derive(symbol=[]) != derive(symbol=())
+    with pytest.raises(TypeError):
+        derive(symbol=sized_value)
 
 
 # --- awkward but legitimate strings --------------------------------------

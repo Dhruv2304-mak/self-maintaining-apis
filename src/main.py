@@ -197,14 +197,18 @@ def group_findings_by_file(findings: list) -> dict:
     each file once, so we group them here and keep the match count for the
     report.
 
+    Args:
+        findings: Finding objects from :meth:`CodebaseScanner.scan`.
+
     Returns:
         A dictionary of ``{file_path: number_of_matches}``, sorted by path so
-        the output is in a predictable order every run.
+        the output is in a predictable order every run. Paths are POSIX-form,
+        as they arrive on CodeLocation.
     """
     counts: dict = {}
 
     for finding in findings:
-        path = str(finding["file_path"])
+        path = finding.location.file_path
         # .get(path, 0) means "the count so far, or 0 if this is the first one".
         counts[path] = counts.get(path, 0) + 1
 
@@ -627,8 +631,12 @@ def main(argv=None):
     # project_root=args.target keeps the scan focused on the code we care
     # about. The scanner skips matches that only appear in comments or strings
     # by default, so prose about Stripe is not reported as real usage.
+    # scan() is the typed Impact Analysis boundary: it takes the ChangeEvent and
+    # returns Finding objects carrying its id, so a fix can be traced back to
+    # the change that prompted it. args.keywords widens the search beyond the
+    # event's own symbol, which is what the older keyword behaviour did.
     scanner = CodebaseScanner(args.target)
-    findings = scanner.scan_for_api_usage(args.keywords)
+    findings = scanner.scan(change_event, args.keywords)
 
     # scanner.files_scanned tells us how much ground we covered, which makes a
     # result of "0 matches" much easier to interpret.
@@ -645,9 +653,9 @@ def main(argv=None):
     else:
         print(f"\nFound {len(findings)} matching line(s):\n")
         for finding in findings:
-            print(f"  File: {finding['file_path']}")
-            print(f"  Line {finding['line_number']}: {finding['line_content'].strip()}")
-            print(f"  Matched: {finding['matched_keyword']}")
+            print(f"  File: {finding.location.file_path}")
+            print(f"  Line {finding.location.line}: {finding.location.snippet}")
+            print(f"  Matched: {finding.matched_symbol}")
             print("-" * 50)
 
     # 3. Fix the real files the scanner just found.
