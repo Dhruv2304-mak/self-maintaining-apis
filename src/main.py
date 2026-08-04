@@ -296,6 +296,23 @@ def build_change_event(args, clock=utc_now_iso) -> ChangeEvent:
     return source.fetch_change_events()[0]
 
 
+def select_search_terms(args, change_event) -> list[str]:
+    """The search terms for one run: explicit --keywords, else the event's
+    symbol. One value feeds both the scan and the printed line, so they cannot
+    diverge.
+
+    Searching for the event's symbol by default is what keeps a Finding honest:
+    a Finding means "one place affected by ONE ChangeEvent", so a match found by
+    some unrelated term would be stamped with this event's id and be a false
+    record. --keywords widens that deliberately, for when a package name appears
+    where the dotted path does not.
+    """
+    if args.keywords is not None:
+        return list(args.keywords)
+
+    return [change_event.symbol]
+
+
 def build_fixer(use_live: bool) -> CodeFixer:
     """Create the fixer and say out loud which mode it actually ended up in.
 
@@ -639,13 +656,9 @@ def main(argv=None):
     # place affected by ONE ChangeEvent. --keywords is an explicit opt-in to
     # widen that, for when a package name appears where the dotted path does not.
     #
-    # search_terms is computed once and used for both the search and the printed
-    # line, so the two cannot disagree about what was looked for.
-    search_terms = (
-        list(args.keywords)
-        if args.keywords is not None
-        else [change_event.symbol]
-    )
+    # Computed once, then used for both the search and the printed line, so the
+    # two cannot disagree about what was looked for.
+    search_terms = select_search_terms(args, change_event)
 
     scanner = CodebaseScanner(args.target)
     findings = scanner.scan(change_event, search_terms)

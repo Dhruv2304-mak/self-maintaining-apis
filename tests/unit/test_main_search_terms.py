@@ -15,6 +15,7 @@ import pytest
 
 import src.main as main_module
 from src.core.scanner import CodebaseScanner
+from src.main import select_search_terms
 
 pytestmark = pytest.mark.unit
 
@@ -34,15 +35,6 @@ PAYMENT_LIKE = (
 )
 
 
-def select_terms(args, change_event):
-    """The rule main() applies. Mirrored here so the assertion is on the rule."""
-    return (
-        list(args.keywords)
-        if args.keywords is not None
-        else [change_event.symbol]
-    )
-
-
 @pytest.fixture
 def event():
     args = main_module.parse_args([])
@@ -60,7 +52,7 @@ def test_keywords_defaults_to_none_rather_than_a_constant():
 def test_default_search_terms_are_exactly_the_events_symbol(event):
     args = main_module.parse_args([])
 
-    assert select_terms(args, event) == [SYMBOL]
+    assert select_search_terms(args, event) == [SYMBOL]
 
 
 def test_main_no_longer_defines_a_keyword_constant():
@@ -73,7 +65,7 @@ def test_the_symbol_default_tracks_an_overridden_symbol(event):
     args = main_module.parse_args(["--symbol", "vendor.Thing.gone"])
     built = main_module.build_change_event(args, clock=lambda: "2026-08-02T00:00:00Z")
 
-    assert select_terms(args, built) == ["vendor.Thing.gone"]
+    assert select_search_terms(args, built) == ["vendor.Thing.gone"]
 
 
 # --- the explicit path ----------------------------------------------------
@@ -82,14 +74,14 @@ def test_the_symbol_default_tracks_an_overridden_symbol(event):
 def test_explicit_keywords_are_used_verbatim(event):
     args = main_module.parse_args(["--keywords", "stripe", "requests.get"])
 
-    assert select_terms(args, event) == ["stripe", "requests.get"]
+    assert select_search_terms(args, event) == ["stripe", "requests.get"]
 
 
 def test_the_symbol_is_not_silently_appended_to_explicit_keywords(event):
     """Widening is the caller's decision; we do not quietly add to it."""
     args = main_module.parse_args(["--keywords", "requests.get"])
 
-    terms = select_terms(args, event)
+    terms = select_search_terms(args, event)
 
     assert terms == ["requests.get"]
     assert SYMBOL not in terms
@@ -98,7 +90,7 @@ def test_the_symbol_is_not_silently_appended_to_explicit_keywords(event):
 def test_a_single_explicit_keyword_is_still_a_list(event):
     args = main_module.parse_args(["--keywords", "stripe"])
 
-    assert select_terms(args, event) == ["stripe"]
+    assert select_search_terms(args, event) == ["stripe"]
 
 
 # --- the printed line matches what was searched ---------------------------
@@ -116,7 +108,7 @@ def test_the_printed_line_lists_exactly_the_terms_searched(event, argv, expected
     """One value feeds both the search and the print, so they cannot diverge."""
     args = main_module.parse_args(argv)
 
-    terms = select_terms(args, event)
+    terms = select_search_terms(args, event)
 
     assert ", ".join(terms) == expected
 
