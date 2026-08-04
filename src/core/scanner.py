@@ -24,6 +24,9 @@ import tokenize
 from typing import Dict, List, Optional, Tuple
 
 from src.core.paths import is_fixed_output
+from src.domain.change_event import ChangeEvent
+from src.domain.finding import CodeLocation, Finding
+from src.domain.ids import derive_finding_id
 
 # Folders we never want to walk into. These hold installed packages or build
 # artefacts, so matches in them are not our code and would drown out the rest.
@@ -216,30 +219,20 @@ class CodebaseScanner:
 
     # --- The main entry point --------------------------------------------
 
-    def scan_for_api_usage(
-        self, api_keywords: List[str]
-    ) -> List[Dict[str, object]]:
-        """Find every line in the project that mentions one of the keywords.
+    def _iter_matches(self, api_keywords: List[str]):
+        """Yield one record per match: the single source of scanning truth.
 
-        Matching is case-insensitive. By default it is a plain substring check,
-        so ``"stripe"`` also matches ``import stripe`` and ``StripeClient``;
-        pass ``whole_word=True`` to the constructor to require complete words.
+        Both public entry points are built on this, so the dictionary form and
+        the :class:`~src.domain.finding.Finding` form cannot drift apart. It
+        yields ``(file_path, line_number, line, column, keyword)`` where
+        `file_path` is the absolute path as :meth:`find_python_files` produced
+        it, `line` is the raw unstripped line, and `column` is the 0-based
+        offset of the first occurrence of `keyword` on it.
 
-        Args:
-            api_keywords: Keywords or endpoint patterns to look for,
-                e.g. ``["stripe", "openai", "requests.get"]``.
-
-        Returns:
-            A list of findings, at most one per keyword per line. Each finding
-            is a dictionary with:
-                - "file_path":       absolute path of the file
-                - "line_number":     1-based line number
-                - "line_content":    the matching line, whitespace trimmed
-                - "matched_keyword": the keyword that matched
-
-            Also sets :attr:`files_scanned` to the number of files read.
+        This is a generator, so :attr:`files_scanned` is only fully updated once
+        it has been consumed to the end. Both callers below build a complete
+        collection, which consumes it.
         """
-        findings: List[Dict[str, object]] = []
         self.files_scanned = 0
 
         for file_path in self.find_python_files():
@@ -282,16 +275,123 @@ class CodebaseScanner:
                         ):
                             continue
 
-                    findings.append(
-                        {
-                            "file_path": file_path,
-                            "line_number": line_number,
-                            "line_content": line.strip(),
-                            "matched_keyword": keyword,
-                        }
-                    )
+                    yield file_path, line_number, line, columns[0], keyword
 
-        return findings
+    def scan(
+        self,
+        change_event: ChangeEvent,
+        api_keywords: Optional[List[str]] = None,
+    ) -> Tuple[Finding, ...]:
+        """Find every place `change_event` affects this project.
+
+        This is the Impact Analysis boundary from ADR-0001: a ChangeEvent plus a
+        repository in, typed Findings out.
+
+        Args:
+            change_event: The change to look for. Its `change_event_id` is
+                carried on every Finding so the two can be joined later.
+            api_keywords: What to search for. Defaults to the change event's own
+                `symbol`, which is the honest default -- the thing that changed
+                is the thing to look for. A caller may widen the search (the CLI
+                passes `--keywords`), because a symbol's package name often
+                appears where the full dotted path does not.
+
+        Returns:
+            A tuple of Finding, possibly empty, at most one per keyword per line.
+            Empty is a normal result, not an error.
+
+        Paths on the returned Findings use forward slashes, so they differ from
+        the native absolute paths :meth:`scan_for_api_usage` returns. ``open()``
+        accepts them either way.
+
+        They are, however, **absolute** -- "C:/project/examples/payment.py", not
+        "examples/payment.py". CodeLocation documents its `file_path` as
+        POSIX-form *and repository-relative*; this method satisfies only the
+        separator half of that contract. Do not read forward slashes as evidence
+        the whole contract is honoured. Making the paths relative is deferred
+        because `file_path` is an input to
+        :func:`~src.domain.ids.derive_finding_id`, so changing its form
+        re-derives every finding id.
+        """
+        keywords = (
+            [change_event.symbol] if api_keywords is None else list(api_keywords)
+        )
+
+        findings: List[Finding] = []
+
+        for file_path, line_number, line, column, keyword in self._iter_matches(
+            keywords
+        ):
+            # POSIX-form for the domain model. The raw path stays available to
+            # the dictionary API, which existing callers still rely on.
+            posix_path = file_path.replace("\\", "/")
+
+            # snippet is the stripped line, matching what the dictionary form
+            # reports. Note that `column` indexes the RAW line, so it does not
+            # line up with an offset into `snippet` when the line is indented.
+            location = CodeLocation(
+                file_path=posix_path,
+                line=line_number,
+                column=column,
+                snippet=line.strip(),
+            )
+
+            findings.append(
+                Finding(
+                    finding_id=derive_finding_id(
+                        change_event_id=change_event.change_event_id,
+                        file_path=posix_path,
+                        line=line_number,
+                        column=column,
+                        matched_symbol=keyword,
+                    ),
+                    change_event_id=change_event.change_event_id,
+                    location=location,
+                    matched_symbol=keyword,
+                )
+            )
+
+        return tuple(findings)
+
+    def scan_for_api_usage(
+        self, api_keywords: List[str]
+    ) -> List[Dict[str, object]]:
+        """Find every line in the project that mentions one of the keywords.
+
+        Matching is case-insensitive. By default it is a plain substring check,
+        so ``"stripe"`` also matches ``import stripe`` and ``StripeClient``;
+        pass ``whole_word=True`` to the constructor to require complete words.
+
+        Args:
+            api_keywords: Keywords or endpoint patterns to look for,
+                e.g. ``["stripe", "openai", "requests.get"]``.
+
+        Returns:
+            A list of findings, at most one per keyword per line. Each finding
+            is a dictionary with:
+                - "file_path":       absolute path of the file
+                - "line_number":     1-based line number
+                - "line_content":    the matching line, whitespace trimmed
+                - "matched_keyword": the keyword that matched
+
+            Also sets :attr:`files_scanned` to the number of files read.
+
+        This is the compatibility form, kept because callers and tests written
+        before the typed boundary existed still use it. :meth:`scan` is the
+        typed entry point; both read from :meth:`_iter_matches`, so the two
+        always report the same matches in the same order.
+        """
+        return [
+            {
+                "file_path": file_path,
+                "line_number": line_number,
+                "line_content": line.strip(),
+                "matched_keyword": keyword,
+            }
+            for file_path, line_number, line, _column, keyword in self._iter_matches(
+                api_keywords
+            )
+        ]
 
 
 if __name__ == "__main__":

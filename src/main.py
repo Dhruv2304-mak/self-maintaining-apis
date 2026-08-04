@@ -56,9 +56,6 @@ DECLARED_CHANGE_CLASS = "removed"
 # self-matches would bury the results you care about.
 SCAN_TARGET = "examples"
 
-# Default keywords, used when --keywords is not given.
-DEFAULT_KEYWORDS = ["stripe", "requests.get"]
-
 # Files the fixer has already written are recognised by is_fixed_output(). We
 # skip them, otherwise the tool would keep trying to "fix" its own previous
 # output, over and over. The rule lives in src/core/paths.py so the scanner and
@@ -95,9 +92,11 @@ def parse_args(argv=None):
     parser.add_argument(
         "--keywords",
         nargs="+",  # accepts one or more values
-        default=DEFAULT_KEYWORDS,
+        default=None,
         metavar="KEYWORD",
-        help="Keywords that mark code as affected.",
+        help="Widen the search beyond the change event's symbol. Defaults to "
+        "the symbol itself, so only code relating to the declared change is "
+        "reported.",
     )
     parser.add_argument(
         "--in-place",
@@ -197,14 +196,18 @@ def group_findings_by_file(findings: list) -> dict:
     each file once, so we group them here and keep the match count for the
     report.
 
+    Args:
+        findings: Finding objects from :meth:`CodebaseScanner.scan`.
+
     Returns:
         A dictionary of ``{file_path: number_of_matches}``, sorted by path so
-        the output is in a predictable order every run.
+        the output is in a predictable order every run. Paths are POSIX-form,
+        as they arrive on CodeLocation.
     """
     counts: dict = {}
 
     for finding in findings:
-        path = str(finding["file_path"])
+        path = finding.location.file_path
         # .get(path, 0) means "the count so far, or 0 if this is the first one".
         counts[path] = counts.get(path, 0) + 1
 
@@ -291,6 +294,23 @@ def build_change_event(args, clock=utc_now_iso) -> ChangeEvent:
         clock=clock,
     )
     return source.fetch_change_events()[0]
+
+
+def select_search_terms(args, change_event) -> list[str]:
+    """The search terms for one run: explicit --keywords, else the event's
+    symbol. One value feeds both the scan and the printed line, so they cannot
+    diverge.
+
+    Searching for the event's symbol by default is what keeps a Finding honest:
+    a Finding means "one place affected by ONE ChangeEvent", so a match found by
+    some unrelated term would be stamped with this event's id and be a false
+    record. --keywords widens that deliberately, for when a package name appears
+    where the dotted path does not.
+    """
+    if args.keywords is not None:
+        return list(args.keywords)
+
+    return [change_event.symbol]
 
 
 def build_fixer(use_live: bool) -> CodeFixer:
@@ -627,13 +647,26 @@ def main(argv=None):
     # project_root=args.target keeps the scan focused on the code we care
     # about. The scanner skips matches that only appear in comments or strings
     # by default, so prose about Stripe is not reported as real usage.
+    # scan() is the typed Impact Analysis boundary: it takes the ChangeEvent and
+    # returns Finding objects carrying its id, so a fix can be traced back to
+    # the change that prompted it.
+    #
+    # The event's symbol is what we search for. Anything else would stamp
+    # unrelated matches with this event's id, and a Finding is defined as one
+    # place affected by ONE ChangeEvent. --keywords is an explicit opt-in to
+    # widen that, for when a package name appears where the dotted path does not.
+    #
+    # Computed once, then used for both the search and the printed line, so the
+    # two cannot disagree about what was looked for.
+    search_terms = select_search_terms(args, change_event)
+
     scanner = CodebaseScanner(args.target)
-    findings = scanner.scan_for_api_usage(args.keywords)
+    findings = scanner.scan(change_event, search_terms)
 
     # scanner.files_scanned tells us how much ground we covered, which makes a
     # result of "0 matches" much easier to interpret.
     print(f"Scanned {scanner.files_scanned} Python file(s) in '{args.target}'.")
-    print(f"Keywords: {', '.join(args.keywords)}")
+    print(f"Searching for: {', '.join(search_terms)}")
 
     if not findings:
         # Zero matches is a perfectly normal outcome, not a failure. Say so
@@ -645,9 +678,9 @@ def main(argv=None):
     else:
         print(f"\nFound {len(findings)} matching line(s):\n")
         for finding in findings:
-            print(f"  File: {finding['file_path']}")
-            print(f"  Line {finding['line_number']}: {finding['line_content'].strip()}")
-            print(f"  Matched: {finding['matched_keyword']}")
+            print(f"  File: {finding.location.file_path}")
+            print(f"  Line {finding.location.line}: {finding.location.snippet}")
+            print(f"  Matched: {finding.matched_symbol}")
             print("-" * 50)
 
     # 3. Fix the real files the scanner just found.
